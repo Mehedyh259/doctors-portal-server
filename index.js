@@ -1,10 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const sgTransport = require('nodemailer-sendgrid-transport');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 
 
 const app = express();
@@ -26,6 +28,7 @@ const verifyToken = (req, res, next) => {
         return res.status(401).send({ message: "unauthorized accesss" });
     }
     const token = authHeader.split(' ')[1];
+
     jwt.verify(token, process.env.ACCESS_SECRET, (err, decoded) => {
         if (err) {
             return res.status(403).send({ message: 'forbidden access' })
@@ -56,7 +59,34 @@ const sendAppointmentEmail = (booking) => {
             <h2>Your Appointment for ${treatment} is confirmed </h2>
             <p>Looking forward to seeing you on ${date} at ${slot} </p>
             <h3>OUR ADDRESS</h3>
-            <h4>Rajshai, Bangladesh</h4>
+            <h4>Rajshahi, Bangladesh</h4>
+        </div>
+        `
+    };
+
+    emailClient.sendMail(email, (err, info) => {
+        if (err) {
+            console.log(err);
+        } else {
+            console.log('Message sent: ', info);
+        }
+    })
+}
+const sendPaymentConfirmationEmail = (booking) => {
+    const { patient, patientName, treatment, date, slot } = booking;
+
+    const emailClient = nodemailer.createTransport(sgTransport(emailSenderOptions));
+    const email = {
+        from: process.env.EMAIL_SENDER,
+        to: patient,
+        subject: `We have received you payment for ${treatment} is confirmed`,
+        text: `Your payment for ${treatment} is on ${date} at ${slot} is confirmed`,
+        html: `<div>
+            <p>Hello, ${patientName}, </p>
+            <h2>Your Payment for ${treatment} is confirmed </h2>
+            <p>Looking forward to seeing you on ${date} at ${slot} </p>
+            <h3>OUR ADDRESS</h3>
+            <h4>Rajshahi, Bangladesh</h4>
         </div>
         `
     };
@@ -80,6 +110,7 @@ const run = async () => {
         const bookingCollection = client.db('doctors_portal').collection('bookings');
         const userCollection = client.db('doctors_portal').collection('users');
         const doctorCollection = client.db('doctors_portal').collection('doctors');
+        const paymentCollection = client.db('doctors_portal').collection('payments');
 
         // verify admin from database
         const verifyAdmin = async (req, res, next) => {
@@ -187,6 +218,13 @@ const run = async () => {
             }
         })
 
+        app.get('/booking/:id', verifyToken, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: ObjectId(id) };
+            const booking = await bookingCollection.findOne(query)
+            res.send(booking);
+        })
+
         app.post('/booking', async (req, res) => {
             const booking = req.body;
             const query = {
@@ -207,6 +245,28 @@ const run = async () => {
             return res.status(200).send({ success: true, result });
         });
 
+        //update payment status
+        app.patch('/booking/:id', verifyToken, async (req, res) => {
+            const id = req.params.id;
+            const payment = req.body;
+            const query = { _id: ObjectId(id) };
+            const updatedDoc = {
+                $set: {
+                    paid: true,
+                    transactionId: payment.transactionId
+                }
+            }
+            const updatedBooking = await bookingCollection.updateOne(query, updatedDoc);
+            const result = await paymentCollection.insertOne(payment);
+
+            const booking = await bookingCollection.findOne({ _id: ObjectId(id) })
+            console.log(booking);
+            sendPaymentConfirmationEmail(booking)
+
+            res.send(updatedBooking);
+
+        })
+
 
         // doctors api
 
@@ -226,6 +286,20 @@ const run = async () => {
             res.send(result);
         });
 
+
+        // PAYMENT RELATED API
+        app.post('/create-payment-intent', verifyToken, async (req, res) => {
+            const service = req.body;
+            const price = service.price;
+            const amount = price * 100;
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                payment_method_types: ['card']
+            })
+
+            res.send({ clientSecret: paymentIntent.client_secret });
+        })
 
 
 
